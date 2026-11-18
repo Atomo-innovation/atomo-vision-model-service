@@ -10,6 +10,13 @@ model_type: number_plate
 # why this must be the Master's ENUM/display string, not a filename.
 display_name: Number Plate
 
+# Which detected plates are stored (MinIO frame) and published (NATS),
+# for all of pt/nb/so:
+#   true  -> only plates whose number OCR has read (plate_number set)
+#   false -> every detected plate; unread ones go out with
+#            plate_number/plate_confidence null
+save_only_ocr_plates: true   # true = only plates OCR has read, false = every detected plate
+
 classes:
   - number_plate
 num_classes: 1
@@ -61,10 +68,11 @@ pt:
   # Plate detector backend. open_image_models = anpr_night's proven
   # YOLOv9-t (ONNX, no torch; auto-downloads on first use; model_file
   # above is then unused). ultralytics = the number_plate.pt checkpoint.
-  backend: open_image_models
-  oim_model: yolo-v9-t-640-license-plate-end2end
-  oim_conf_thresh: 0.25   # anpr_night's value
-  shape_filter: false     # anpr_night applies no box shape filter
+  backend: ultralytics    # testing our own trained number_plate.pt (cars + 2/3-wheelers)
+  # backend: open_image_models
+  # oim_model: yolo-v9-t-640-license-plate-end2end
+  # oim_conf_thresh: 0.25   # anpr_night's value
+  shape_filter: false     # keep off: 2/3-wheeler plates are squarish (aspect < 2.0) and would be rejected
 
 nb:
   # Amlogic A311D NPU runtime options (see runtimes/npu/nb_runtime.py).

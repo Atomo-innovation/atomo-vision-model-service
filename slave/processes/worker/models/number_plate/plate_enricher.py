@@ -76,7 +76,10 @@ class PlateEnricher:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if self._ocr is not None and pairs else None
 
         for detection, track in pairs:
-            interval = self._interval if track.confirmation_count else self._search_interval
+            # Full OCR rate until the plate's number is published; after that
+            # only every `interval_frames` (saves CPU on slow boards without
+            # changing which number gets published).
+            interval = self._interval if track.published else self._search_interval
             if self._ocr is not None and (frame_number - track.last_ocr_frame) >= interval:
                 track.last_ocr_frame = frame_number
                 plate, score, valid, _ = self._ocr.read_plate(gray, detection.bbox)

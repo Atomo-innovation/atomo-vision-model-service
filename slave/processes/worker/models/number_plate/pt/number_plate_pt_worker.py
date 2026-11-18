@@ -54,6 +54,7 @@ class NumberPlatePtWorker:
         model_path = os.path.join(models_dir, assignment.model_name)
         self._detector = NumberPlatePtDetector(model_path, model_config, assignment.model_name)
         self._enricher = PlateEnricher(model_config)
+        self._save_only_ocr_plates = bool(model_config.get("save_only_ocr_plates", True))
 
         url = job.camera_stream
         # PT must always work from the newest available frame. The reader keeps a
@@ -102,10 +103,11 @@ class NumberPlatePtWorker:
         )
         event_plates = self._enricher.take_publishable()
 
-        # Only plates whose number was actually read are published (and
-        # uploaded) -- an unread plate would just be a null plate_number
-        # event. Video still records every detected plate.
-        readable_plates = event_plates
+        # save_only_ocr_plates (number_plate.yaml): true -> only plates
+        # whose number was read (once per track) are published/uploaded;
+        # false -> every detected plate, unread ones with a null
+        # plate_number. Video still records every detected plate.
+        readable_plates = event_plates if self._save_only_ocr_plates else plate_detections
 
         object_key = url = None
         annotated = None

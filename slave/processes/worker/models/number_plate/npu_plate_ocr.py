@@ -151,9 +151,11 @@ class NpuPlateOcr:
 
     def _recognize(self, image: np.ndarray) -> Tuple[str, float]:
         try:
-            # fast_plate_ocr's CCT models are trained on grayscale crops.
+            # Grayscale content, but handed over as 3 channels: the v2 CCT
+            # models (cct-s-v2-global-model) take a 64x128x3 input, and the
+            # .pt path's plate_ocr.py feeds them the same way.
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            result = self._recognizer.run_one(gray, return_confidence=True)
+            result = self._recognizer.run_one(cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR), return_confidence=True)
             text = str(result.plate or "").strip()
             score = float(np.mean(result.char_probs)) if result.char_probs is not None and result.char_probs.size else 0.0
             return text, score

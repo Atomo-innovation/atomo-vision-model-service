@@ -55,15 +55,18 @@ class PlateOcr:
         h, w = gray_frame.shape[:2]
         x1, y1, x2, y2 = (int(round(v)) for v in bbox)
         reads: List[Tuple[str, bool, float, str, str, float]] = []
+        variants: List[Tuple[str, float, np.ndarray]] = []
         for pad in self._pad_ratios:
             px, py = int(pad[0] * (x2 - x1)), int(pad[1] * (y2 - y1))
             crop = gray_frame[max(0, y1 - py):min(h, y2 + py), max(0, x1 - px):min(w, x2 + px)]
             if crop.size == 0:
                 continue
-            for name, img in (("raw", crop), ("clean", enhance_plate(crop))):
-                text, score = self._run_ocr(img)
-                plate, ok = normalize_plate(text)
-                reads.append((plate, ok, score, text, name, pad))
+            variants += [("raw", pad, crop), ("clean", pad, enhance_plate(crop))]
+        # One batched OCR call for all variants: identical reads to calling
+        # them one by one (verified on the A311D board), less overhead.
+        for (name, pad, _), (text, score) in zip(variants, self._run_ocr_batch([img for _, _, img in variants])):
+            plate, ok = normalize_plate(text)
+            reads.append((plate, ok, score, text, name, pad))
 
         if not reads:
             return "", 0.0, False, reads
@@ -75,14 +78,23 @@ class PlateOcr:
         conf = max(r[2] for r in pool if r[0] == best)
         return best, conf, bool(valid), reads
 
-    def _run_ocr(self, img_gray: np.ndarray) -> Tuple[str, float]:
+    def _run_ocr_batch(self, imgs_gray: List[np.ndarray]) -> List[Tuple[str, float]]:
+        if not imgs_gray:
+            return []
         try:
-            result = self._recognizer.run(cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR), return_confidence=True)[0]
-            score = float(np.mean(result.char_probs)) if result.char_probs is not None else 0.0
-            return result.plate.replace("_", "").strip().upper(), score
+            results = self._recognizer.run(
+                [cv2.cvtColor(img, cv2.COLOR_GRAY2BGR) for img in imgs_gray], return_confidence=True
+            )
+            return [
+                (
+                    result.plate.replace("_", "").strip().upper(),
+                    float(np.mean(result.char_probs)) if result.char_probs is not None else 0.0,
+                )
+                for result in results
+            ]
         except Exception:
             log.exception("fast-plate-ocr inference failed")
-            return "", 0.0
+            return [("", 0.0)] * len(imgs_gray)
 
     def release(self) -> None:
         self._recognizer = None
