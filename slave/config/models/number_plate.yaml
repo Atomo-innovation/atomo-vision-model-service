@@ -135,6 +135,8 @@ ocr:
   # A plate is published only when this many reads agree on the exact
   # same plate string (2 stops a single wrong read being published).
   min_confirmations: 2
+  # OCR only plates at least this tall (px); smaller ones are still detected/saved. 0 = off.
+  min_plate_height_px: 24
   validate_indian_plate: true
 # Tracking + OCR + plate-number voting for the NPU (.nb/.so) workers --
 # ported from the board-verified alpr_npu.py (npu_plate_enricher.py).
