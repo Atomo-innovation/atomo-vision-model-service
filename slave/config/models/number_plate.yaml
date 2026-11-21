@@ -15,7 +15,7 @@ display_name: Number Plate
 #   true  -> only plates whose number OCR has read (plate_number set)
 #   false -> every detected plate; unread ones go out with
 #            plate_number/plate_confidence null
-save_only_ocr_plates: true   # true = only plates OCR has read, false = every detected plate
+save_only_ocr_plates: false   # true = only plates OCR has read, false = every detected plate
 
 classes:
   - number_plate
@@ -33,10 +33,16 @@ thresholds:
 # boxes too small to ever OCR successfully, or shaped nothing like a
 # plate (rejects square-ish false positives: signs, faces, etc.),
 # before they reach tracking/OCR at all.
+#
+# Used only by the .nb/.so path (npu_decoder.py); the .pt path has its own
+# pt.filters + pt.shape_filter. Relaxed for the own trained model, which
+# also detects 2/3-wheeler plates: square two-line plates (aspect ~1.2-1.9)
+# and small bike plates were 78% of its night-camera detections and were
+# all dropped at the old 2.0 / 45 px limits.
 filters:
-  min_plate_width_px: 45
-  min_plate_height_px: 15
-  min_plate_aspect: 2.0        # width / height
+  min_plate_width_px: 20       # was 45
+  min_plate_height_px: 12      # was 15
+  min_plate_aspect: 1.0        # width / height; was 2.0 (dropped every two-line plate)
   max_plate_aspect: 8.0
   min_plate_area_ratio: 0.00005   # plate box area / full-frame area -- rejects tiny noise detections
 
