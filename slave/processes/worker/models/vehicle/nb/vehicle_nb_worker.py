@@ -65,6 +65,9 @@ class VehicleNbWorker:
         library_path = os.path.join(models_dir, library_file) if library_file else None
         self._detector = VehicleNbDetector(model_path, library_path, model_config, assignment.model_name)
 
+        from slave.processes.worker.models.vehicle_color.color_enricher import VehicleColorEnricher
+        self._color_enricher = VehicleColorEnricher(model_config, models_dir)
+
         url = job.camera_stream
         self._frame_reader = FrameReader(worker_key, url)
 
@@ -97,6 +100,7 @@ class VehicleNbWorker:
 
     def _process_frame(self, frame) -> None:
         vehicle_detections = self._detector.detect(frame.image)
+        vehicle_detections = self._color_enricher.enrich(frame.image, vehicle_detections)
 
         object_key = url = None
         annotated = None
@@ -150,6 +154,10 @@ class VehicleNbWorker:
             self._video_manager.feed_frame(annotated)
 
     def _cleanup(self) -> None:
+        try:
+            self._color_enricher.release()
+        except Exception:
+            self._log.exception("error releasing color enricher")
         try:
             self._frame_reader.stop()
         except Exception:

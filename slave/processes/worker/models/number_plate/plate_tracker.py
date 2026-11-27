@@ -1,4 +1,10 @@
-"""Per-job plate tracker retaining accepted reads and tentative OCR candidates."""
+"""Per-job plate tracker based on the supplied ALPR reference.
+
+A track keeps OCR reads for the same physical plate. The best value is
+selected by whole-string vote: highest observation count first, then
+average OCR confidence. This matches the reference behaviour and avoids
+publishing every intermediate OCR guess as a separate event.
+"""
 
 from __future__ import annotations
 
@@ -21,26 +27,13 @@ class PlateTrack:
     current_score: float = 0.0
     confirmation_count: int = 0
     published: bool = False
-    detection_event_published: bool = False
-    detection_observations: int = 1
     history: List[Tuple[str, float]] = field(default_factory=list)
-    candidate_text: str = ""
-    candidate_score: float = 0.0
-    last_event_plate: str = ""
-    last_event_confirmed: bool = False
 
     # Capture-time state. PT reads the newest available frame, so processed
     # frame numbers are not consecutive source frames.
     last_seen_frame: int = -1
     last_seen_timestamp: float = 0.0
     velocity: Center = (0.0, 0.0)
-
-    def record_candidate(self, text: str, score: float) -> None:
-        """Remember the latest non-empty OCR output, even if unconfirmed."""
-        normalized = text.strip().upper()
-        if normalized:
-            self.candidate_text = normalized
-            self.candidate_score = float(score)
 
     def record_ocr(self, text: str, score: float, max_history: int) -> None:
         if not text:
@@ -50,19 +43,20 @@ class PlateTrack:
         if len(self.history) > max_history:
             self.history.pop(0)
 
-        counts = Counter(value for value, _ in self.history)
+        counts = Counter(text for text, _ in self.history)
         candidates = []
+
         for value, count in counts.items():
-            scores = [read_score for read_text, read_score in self.history if read_text == value]
+            scores = [score for text, score in self.history if text == value]
             avg_score = sum(scores) / len(scores)
             candidates.append((count, avg_score, value))
 
         candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
         count, avg_score, best_text = candidates[0]
+
         self.current_text = best_text
         self.current_score = avg_score
         self.confirmation_count = count
-        self.record_candidate(best_text, avg_score)
 
 
 def _center(bbox: Tuple[float, float, float, float]) -> Center:
@@ -114,6 +108,7 @@ class PlateTracker:
             age = self._age_seconds(track, timestamp)
             if age > self._max_track_gap_seconds:
                 continue
+
             predicted = self._predicted_center(track, timestamp)
             for di, center in enumerate(centers):
                 distance = _distance(predicted, center)
@@ -122,6 +117,7 @@ class PlateTracker:
                 possible.append((max(0.0, distance - motion_allowance), ti, di))
 
         possible.sort(key=lambda item: item[0])
+
         matched_tracks = set()
         matched_detections = set()
         result: List[Tuple[Detection, PlateTrack] | None] = [None] * len(detections)
@@ -131,6 +127,7 @@ class PlateTracker:
                 continue
             if ti in matched_tracks or di in matched_detections:
                 continue
+
             track = self._tracks[ti]
             old_center = track.center
             dt = self._age_seconds(track, timestamp)
@@ -156,7 +153,6 @@ class PlateTracker:
             track.last_seen_frame = frame_number
             track.last_seen_timestamp = timestamp
             track.missed = 0
-            track.detection_observations += 1
             matched_tracks.add(ti)
             matched_detections.add(di)
             result[di] = (detections[di], track)
@@ -168,6 +164,7 @@ class PlateTracker:
         for di, detection in enumerate(detections):
             if di in matched_detections:
                 continue
+
             track = PlateTrack(
                 track_id=self._next_id,
                 center=centers[di],
@@ -185,4 +182,5 @@ class PlateTracker:
                 or (timestamp > 0.0 and self._age_seconds(track, timestamp) <= self._max_track_gap_seconds)
             )
         ]
+
         return [item for item in result if item is not None]

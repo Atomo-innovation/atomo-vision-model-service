@@ -96,3 +96,16 @@ so:
   # Same "ABI not wired up yet" gap as every other model's .so path
   # today (SoRuntime._init()/infer() raise NotImplementedError).
   device_id: 0
+
+color:
+  # Vehicle color recognition toggle. When enabled, detected vehicles are
+  # cropped and classified into 9 color classes (black, blue, brown, gray,
+  # green, orange, red, white, yellow).
+  # Set false to completely disable color recognition and free all associated memory.
+  enabled: true
+  model_name: vehicle_color.pt   # or vehicle_color.nb on A311D NPU
+  confidence_threshold: 0.40
+  min_crop_pixels: 40
+  device: auto
+
+

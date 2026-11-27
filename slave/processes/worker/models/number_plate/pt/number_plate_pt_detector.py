@@ -46,7 +46,6 @@ class NumberPlatePtDetector:
 
         pt_cfg = model_config.get("pt", {})
         self._backend = pt_cfg.get("backend", "ultralytics")
-        self._image_size = int(pt_cfg.get("image_size", 640))
         self._filters_enabled = bool(pt_cfg.get("shape_filter", True))
         self._runtime = None
         self._oim = None
@@ -89,7 +88,7 @@ class NumberPlatePtDetector:
                 b = d.bounding_box
                 yield float(b.x1), float(b.y1), float(b.x2), float(b.y2), float(d.confidence)
             return
-        result = self._runtime.infer(frame, conf=self._obj_thresh, iou=self._nms_thresh, imgsz=self._image_size)
+        result = self._runtime.infer(frame, conf=self._obj_thresh, iou=self._nms_thresh)
         for box in getattr(result, "boxes", None) or []:
             x1, y1, x2, y2 = (float(v) for v in box.xyxy[0])
             yield x1, y1, x2, y2, float(box.conf[0])

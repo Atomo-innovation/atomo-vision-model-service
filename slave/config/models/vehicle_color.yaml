@@ -1,0 +1,49 @@
+# Static model configuration for model_type: vehicle_color.
+# Standalone model (own jobs.yaml entries with model_type: "vehicle_color").
+
+model_type: vehicle_color
+display_name: Vehicle Color
+
+classes:
+  - black
+  - blue
+  - brown
+  - gray
+  - green
+  - orange
+  - red
+  - white
+  - yellow
+num_classes: 9
+
+thresholds:
+  obj_thresh: 0.25
+  nms_thresh: 0.45
+  conf_thresh: 0.40
+  min_crop_pixels: 40
+
+# Detector used to locate vehicles before classifying their colors:
+detector:
+  pt_weights: vehicle.pt
+  nb_weights: vehicle.nb
+  library_file: vehicle.so
+  obj_thresh: 0.25
+  nms_thresh: 0.45
+
+color:
+  enabled: true
+  model_name: vehicle_color.pt   # or vehicle_color.nb on A311D board
+  confidence_threshold: 0.40
+  min_crop_pixels: 40
+  device: auto
+
+nb:
+  level: 0
+  device_id: 0
+  board: Electron
+  library_file: libnn_vehicle_color.so
+  obj_thresh: 0.25
+  nms_thresh: 0.45
+
+so:
+  device_id: 0

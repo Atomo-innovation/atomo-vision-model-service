@@ -37,9 +37,6 @@ class NpuPlateEnricher:
 
         self._min_ocr_conf = float(cfg.get("min_ocr_conf", 0.45))
         self._publish_only_stable = bool(cfg.get("publish_only_stable", True))
-        self._unrecognized_after_frames = max(1, int(cfg.get("unrecognized_after_frames", 3)))
-        self._ocr_interval_frames = max(1, int(cfg.get("interval_frames", 3)))
-        self._publish_queue: List[Detection] = []
 
         self._tracker = NpuPlateTracker(
             iou_threshold=float(cfg.get("track_iou_threshold", 0.20)),
@@ -65,61 +62,24 @@ class NpuPlateEnricher:
         enriched: List[Detection] = []
 
         for detection, track in self._tracker.update(detections):
-            ocr_attempted = self._ocr is None or frame_number - track.last_ocr_frame >= self._ocr_interval_frames
-            if self._ocr is not None and ocr_attempted:
-                track.last_ocr_frame = frame_number
+            if self._ocr is not None:
                 raw_text, raw_conf = self._read_plate(frame, detection.bbox)
                 if raw_text and raw_conf >= self._min_ocr_conf:
                     track.add_ocr(raw_text, raw_conf)
 
             best_text, best_conf, stable, _ = track.get_best_result()
-            valid = bool(best_text) and is_indian_plate(best_text)
-            publish = valid and (stable if self._publish_only_stable else True)
+            publish = bool(best_text) and (stable if self._publish_only_stable else is_indian_plate(best_text))
 
-            log.info(
-                "PLATE_DECISION track=%s age=%s ocr_attempted=%s "
-                "best_text=%r confidence=%.4f stable=%s publish=%s "
-                "published=%s event_published=%s",
-                track.track_id,
-                track.age,
-                ocr_attempted,
-                best_text,
-                best_conf,
-                stable,
-                publish,
-                track.published,
-                track.detection_event_published,
-            )
-
-            enriched_detection = replace(
-                detection,
-                extra={
-                    "plate_track_id": track.track_id,
-                    "plate_number": best_text if publish else None,
-                    "plate_confidence": best_conf if publish else None,
-                },
-            )
-            enriched.append(enriched_detection)
-
-            # Publish persistent events only for valid, stable plate numbers.
-            if publish and not track.published:
-                track.published = True
-                track.detection_event_published = True
-                self._publish_queue.append(enriched_detection)
-                log.info(
-                    "PLATE_EVENT_QUEUED status=recognized track=%s age=%s "
-                    "plate=%s confidence=%.4f queue_size=%s",
-                    track.track_id, track.age, best_text, best_conf,
-                    len(self._publish_queue),
+            enriched.append(
+                replace(
+                    detection,
+                    extra={
+                        "plate_number": best_text if publish else None,
+                        "plate_confidence": best_conf if publish else None,
+                    },
                 )
+            )
         return enriched
-
-    def take_publishable(self) -> List[Detection]:
-        queued = self._publish_queue
-        self._publish_queue = []
-        if queued:
-            log.info("PLATE_EVENT_QUEUE_DRAINED count=%s", len(queued))
-        return queued
 
     def _read_plate(self, frame: np.ndarray, bbox: Tuple[float, float, float, float]) -> Tuple[str, float]:
         h, w = frame.shape[:2]

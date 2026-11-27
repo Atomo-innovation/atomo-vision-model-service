@@ -2,9 +2,10 @@
 model_type: "number_plate", independent of any Person/Safety job.
 
 Same structure as fire_nb_worker.py (own detector + own thread per job,
-no shared scheduler) plus this model's per-job NpuPlateEnricher
-(npu_plate_enricher.py: IoU tracking + OCR + evidence-weighted plate voting,
-ported from the board-verified alpr_npu.py; the `.pt` worker keeps its own).
+no shared scheduler) plus a per-job PlateEnricher -- the same OCR,
+tracking and publish-once-when-confirmed logic as the `.pt` worker (only
+detection runs on the NPU). npu_plate_enricher.py read the same plates far
+worse on live footage (0 correct vs 11 on the same captured loops).
 
 NOTE -- NPU sharing: like Fire/Face/Safety `.nb` workers (and unlike
 Person's round-robin scheduler), this owns an independent NbRuntime
@@ -17,6 +18,7 @@ fire_nb_worker.py's note for the caveat and the eventual fix
 from __future__ import annotations
 
 import os
+import queue
 import threading
 import time
 
@@ -30,8 +32,7 @@ from slave.processes.publisher.detection_publisher import DetectionPublisher
 from slave.processes.stream.frame_reader import FrameReader
 from slave.processes.video.video_manager import VideoManager
 from slave.processes.worker.models.number_plate.nb.number_plate_nb_detector import NumberPlateNbDetector
-from slave.processes.worker.models.number_plate.npu_plate_enricher import NpuPlateEnricher
-from slave.processes.worker.models.number_plate.shared_detector import acquire_shared_detector
+from slave.processes.worker.models.number_plate.plate_enricher import PlateEnricher
 from slave.processes.worker.worker_factory import WorkerIdentity
 from slave.utils.time_utils import ist_now_iso
 
@@ -57,27 +58,14 @@ class NumberPlateNbWorker:
         self._frame_uploader = frame_uploader
         self._video_manager = video_manager
         self._identity = identity
-        self._cleanup_lock = threading.Lock()
-        self._cleaned = False
         self._log = get_logger(__name__, job_id=job.job_id)
 
         library_file = model_config.get("nb", {}).get("library_file", "")
         model_path = os.path.join(models_dir, assignment.model_name)
         library_path = os.path.join(models_dir, library_file) if library_file else None
-        nb_cfg = model_config.get("nb", {})
-        detector_key = (
-            "number_plate_nb",
-            os.path.realpath(model_path),
-            os.path.realpath(library_path) if library_path else "",
-            int(nb_cfg.get("level", 0)),
-            int(nb_cfg.get("device_id", 0)),
-            str(nb_cfg.get("board", "Electron")),
-        )
-        self._detector = acquire_shared_detector(
-            detector_key,
-            lambda: NumberPlateNbDetector(model_path, library_path, model_config, assignment.model_name),
-        )
-        self._enricher = NpuPlateEnricher(model_config)
+        self._detector = NumberPlateNbDetector(model_path, library_path, model_config, assignment.model_name)
+        self._enricher = PlateEnricher(model_config)
+        self._save_only_ocr_plates = bool(model_config.get("save_only_ocr_plates", True))
         target_fps = float(model_config.get("nb", {}).get("target_fps", 12))
         self._min_interval = 1.0 / target_fps if target_fps > 0 else 0.0
 
@@ -85,70 +73,84 @@ class NumberPlateNbWorker:
         self._frame_reader = FrameReader(worker_key, url)
 
         self._stop_event = threading.Event()
+        # NPU detection and CPU OCR run in parallel: the detect thread hands
+        # its newest (frame, detections) to the OCR thread through a 1-slot
+        # queue (stale entries are replaced), so a frame costs the slower of
+        # the two steps instead of both added together.
+        self._detected: "queue.Queue[tuple]" = queue.Queue(maxsize=1)
         self._thread = threading.Thread(
             target=self._run, name=f"number-plate-nb-{worker_key}", daemon=True
+        )
+        self._ocr_thread = threading.Thread(
+            target=self._ocr_run, name=f"number-plate-nb-ocr-{worker_key}", daemon=True
         )
 
     def start(self) -> None:
         self._frame_reader.start()
         self._thread.start()
+        self._ocr_thread.start()
         self._log.info("number_plate .nb worker started")
 
     def stop(self) -> None:
         self._stop_event.set()
-        if self._thread.ident is None:
-            # Safely handle stop-before-start or a failed thread start.
-            self._cleanup()
-        else:
-            self._thread.join(timeout=10)
-            if self._thread.is_alive():
-                self._log.error(
-                    "worker thread did not stop within 10 seconds; "
-                    "cleanup will run when the worker exits"
-                )
-            else:
-                self._cleanup()
-        self._log.info("number_plate .nb worker stop requested")
+        self._thread.join(timeout=10)
+        self._ocr_thread.join(timeout=10)
+        self._cleanup()
+        self._log.info("number_plate .nb worker stopped")
 
     def is_alive(self) -> bool:
-        return self._thread.is_alive()
+        return self._thread.is_alive() and self._ocr_thread.is_alive()
 
     def _run(self) -> None:
-        try:
-            # alpr_npu.py caps NPU inference at NPU_FPS (12): running the NPU
-            # plus per-track OCR on every camera frame is far too heavy for
-            # the board. Sleep off the rest of the interval, then take the
-            # newest frame (FrameReader keeps only the latest).
-            last_started = 0.0
-            while not self._stop_event.is_set():
-                wait = self._min_interval - (time.monotonic() - last_started)
-                if wait > 0 and self._stop_event.wait(wait):
-                    break
-                frame = self._frame_reader.get_latest_frame(timeout=FRAME_POLL_TIMEOUT_SECONDS)
-                if frame is None:
-                    continue
-                last_started = time.monotonic()
-                try:
-                    self._process_frame(frame)
-                except Exception:
-                    self._log.exception("frame processing failed for frame_id=%s", frame.frame_id)
-        finally:
-            # Do not release the detector while inference may still be running.
-            self._cleanup()
+        # alpr_npu.py caps NPU inference at NPU_FPS (12): running the NPU
+        # plus per-track OCR on every camera frame is far too heavy for
+        # the board. Sleep off the rest of the interval, then take the
+        # newest frame (FrameReader keeps only the latest).
+        last_started = 0.0
+        while not self._stop_event.is_set():
+            wait = self._min_interval - (time.monotonic() - last_started)
+            if wait > 0 and self._stop_event.wait(wait):
+                break
+            frame = self._frame_reader.get_latest_frame(timeout=FRAME_POLL_TIMEOUT_SECONDS)
+            if frame is None:
+                continue
+            last_started = time.monotonic()
+            try:
+                raw_detections = self._detector.detect(frame.image)
+            except Exception:
+                self._log.exception("plate detection failed for frame_id=%s", frame.frame_id)
+                continue
+            try:
+                self._detected.get_nowait()  # drop the stale, not-yet-OCR'd frame
+            except queue.Empty:
+                pass
+            self._detected.put_nowait((frame, raw_detections))
 
-    def _process_frame(self, frame) -> None:
-        raw_detections = self._detector.detect(frame.image)
-        plate_detections = self._enricher.enrich(frame.image, raw_detections, frame.frame_id)
-        event_plates = self._enricher.take_publishable()
-        self._log.info(
-            "PLATE_WORKER_EVENTS camera=%s frame=%s count=%s",
-            self._job.camera_id, frame.frame_id, len(event_plates),
+    def _ocr_run(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                frame, raw_detections = self._detected.get(timeout=FRAME_POLL_TIMEOUT_SECONDS)
+            except queue.Empty:
+                continue
+            try:
+                self._process_frame(frame, raw_detections)
+            except Exception:
+                self._log.exception("frame processing failed for frame_id=%s", frame.frame_id)
+
+    def _process_frame(self, frame, raw_detections) -> None:
+        plate_detections = self._enricher.enrich(
+            frame.image,
+            raw_detections,
+            frame.frame_id,
+            frame_timestamp=frame.timestamp,
         )
+        event_plates = self._enricher.take_publishable()
 
-        # Only plates whose number was actually read are published (and
-        # uploaded) -- an unread plate would just be a null plate_number
-        # event. Video still records every detected plate.
-        readable_plates = event_plates
+        # save_only_ocr_plates (number_plate.yaml): true -> only plates
+        # whose number was read (once per track) are published/uploaded;
+        # false -> every detected plate, unread ones with a null
+        # plate_number. Video still records every detected plate.
+        readable_plates = event_plates if self._save_only_ocr_plates else plate_detections
 
         object_key = url = None
         annotated = None
@@ -187,52 +189,12 @@ class NumberPlateNbWorker:
             width=width,
             height=height,
         )
-        if result.has_detections:
-            self._log.info(
-                "PLATE_WORKER_PUBLISH camera=%s frame=%s telemetry_groups=%s instances=%s",
-                self._job.camera_id,
-                frame.frame_id,
-                len(result.telemetry),
-                sum(len(group.instances) for group in result.telemetry),
-            )
         self._detection_publisher.publish_detection(result)
-
-        # Send raw boxes immediately on the live subject; recognized-plate
-        # events above remain filtered to plates with a confirmed number.
-        if plate_detections:
-            live_result = DetectionResult(
-                job_id=self._job.job_id,
-                frame_id=frame.frame_id,
-                occurred_at=ist_now_iso(),
-                device_name=self._identity.device_name,
-                branch_id=self._job.branch_id,
-                branch_name=self._job.branch_name,
-                device_id=self._identity.device_id,
-                zone_id=self._job.zone_id,
-                zone_name=self._job.zone_name,
-                camera_id=self._job.camera_id,
-                camera_name=self._job.camera_name,
-                camera_stream=self._job.camera_stream,
-                camera_status=self._frame_reader.get_status(),
-                latitude=self._job.latitude,
-                longitude=self._job.longitude,
-                # Always publish the true inference-frame dimensions with live
-                # boxes; the frontend must scale bboxes against this exact frame.
-                width=int(frame.image.shape[1]),
-                height=int(frame.image.shape[0]),
-                telemetry=group_detections(plate_detections, self._job, tracking_id=None),
-            )
-            self._detection_publisher.publish_live_detection(live_result, self._job.camera_id)
 
         if plate_detections:
             self._video_manager.feed_frame(annotated)
 
     def _cleanup(self) -> None:
-        # stop() and _run()'s finally block may both request cleanup.
-        with self._cleanup_lock:
-            if self._cleaned:
-                return
-            self._cleaned = True
         try:
             self._frame_reader.stop()
         except Exception:

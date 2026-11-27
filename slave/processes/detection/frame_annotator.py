@@ -39,6 +39,9 @@ def draw_detections(image: np.ndarray, detections: Sequence[Detection]) -> np.nd
         plate_number = det.extra.get("plate_number") if det.extra else None
         if plate_number:
             label += f" | {plate_number}"
+        color = det.extra.get("color") if det.extra else None
+        if color:
+            label += f" | {color}"
         (text_w, text_h), _ = cv2.getTextSize(label, _FONT, _FONT_SCALE, _FONT_THICKNESS)
         label_y = max(y1, text_h + 8)
         cv2.rectangle(annotated, (x1, label_y - text_h - 8), (x1 + text_w + 4, label_y), _BOX_COLOR, -1)

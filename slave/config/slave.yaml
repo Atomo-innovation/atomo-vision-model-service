@@ -7,18 +7,18 @@
 # approval_status are normally auto-generated; entered manually here
 # for now). Set uniquely per physical device before deploying.
 device_id: 0b8f67b2-a699-434f-9ca2-e2206cd9f7b3
-device_name: neha-zbook
-password: '1234'
+device_name: savan-patel-victus
+password: '190325'
 device_role: slave
-ip: 192.168.1.16
-dns_name: neha-zbook.local
+ip: 192.168.1.13
+dns_name: savan-patel-victus.local
 mac_id: '40:EC:99:B6:58:55'
 serial_no: SN-99B65855
 status: Active
 approval_status: approved
 
 nats:
-  host: 192.168.1.38
+  host: 127.0.0.1
   port: 4222
   use_websocket: false
   reconnect_wait_seconds: 2
@@ -42,7 +42,6 @@ nats:
       - devices.*.register
       - devices.*.health
       - devices.*.detections
-      - detections.live.*
     subscribe:
       - _INBOX.>
       - "*.jobs.assign"
@@ -59,10 +58,10 @@ jobs:
   poll_interval_seconds: 5
 
 minio:
-  endpoint: 192.168.1.38:9000
+  endpoint: 192.168.1.20:9000
   access_key: minioadmin
   secret_key: minioadmin
-  bucket: face
+  bucket: text
   secure: false
   enabled: true # TEMP: MinIO server at 192.168.1.21 has no license — set back to true once 'mc license update' is run on the server
 

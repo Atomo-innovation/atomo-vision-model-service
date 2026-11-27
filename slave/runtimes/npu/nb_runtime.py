@@ -41,7 +41,7 @@ def _load_sdk() -> Any:
     package name(s) for this board; extend this list with whatever the
     A311D BSP/SDK documentation specifies.
     """
-    for module_name in ("asnn.api", "ksnn.api"):
+    for module_name in ("asnn.api", "ksnn.api", "asnn", "ksnn"):
         try:
             module = __import__(module_name, fromlist=["*"])
             log.info("loaded NPU SDK module '%s'", module_name)
@@ -67,26 +67,32 @@ class NbRuntime:
         level: int = 0,
         device_id: int = 0,
         board: str = "Electron",
+        output_tensor: int = 3,
     ) -> None:
         self._model_path = model_path
         self._library_path = library_path
         self._level = level
         self._device_id = device_id
         self._board = board
+        # Number of output tensors to read back; must match the model
+        # (3 for the YOLO detectors, 1 for classifiers). Requesting more
+        # than the model has makes the SDK read past its buffers and segfault.
+        self._output_tensor = output_tensor
         self._handle: Any = None
         self._types: Any = None
         self._init()
 
     def _init(self) -> None:
         sdk = _load_sdk()
-        self._types = importlib.import_module(sdk.__name__.rsplit(".", 1)[0] + ".types")
+        base_pkg = sdk.__name__.split(".")[0]
+        self._types = importlib.import_module(f"{base_pkg}.types")
 
-        if sdk.__name__.startswith("ksnn"):
-            self._handle = sdk.KSNN()
+        if base_pkg.startswith("ksnn"):
+            ksnn_cls = getattr(sdk, "KSNN", None) or getattr(getattr(sdk, "api", None), "KSNN", None)
+            self._handle = ksnn_cls()
         else:
-            # ASNN's constructor takes the board identifier (see
-            # ~/p2.py on the board: `asnn("Electron")`), unlike KSNN.
-            self._handle = sdk.asnn(self._board)
+            asnn_cls = getattr(sdk, "asnn", None) or getattr(getattr(sdk, "api", None), "asnn", None)
+            self._handle = asnn_cls(self._board)
 
         result = self._handle.nn_init(library=self._library_path, model=self._model_path, level=self._level)
         # The on-board reference scripts treat a result without 'SUCCESS' as a failed init.
@@ -107,7 +113,7 @@ class NbRuntime:
             [input_tensor],
             platform="ONNX",
             reorder="2 1 0",
-            output_tensor=3,
+            output_tensor=self._output_tensor,
             output_format=self._types.output_format.OUT_FORMAT_FLOAT32,
         )
         return list(data)
