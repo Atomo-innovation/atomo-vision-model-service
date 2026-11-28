@@ -55,17 +55,20 @@ class _ColorJob:
 class _NpuColorBackend:
     """Direct A311D ASNN single-output classifier backend for .nb/.so models."""
 
-    def __init__(self, model_path: str, input_size: Tuple[int, int] = (224, 224)) -> None:
+    def __init__(
+        self, model_path: str, input_size: Tuple[int, int] = (224, 224), library_path: Optional[str] = None
+    ) -> None:
         from asnn.api import asnn
         from asnn.types import asnn_stat, output_format
 
-        dir_name = os.path.dirname(model_path)
-        lib_candidates = [
-            os.path.join(dir_name, "libnn_vehicle_color.so"),
-            os.path.join(dir_name, "vehicle_color.so"),
-            os.path.splitext(model_path)[0] + ".so",
-        ]
-        library_path = next((p for p in lib_candidates if os.path.isfile(p)), None)
+        if not library_path:
+            dir_name = os.path.dirname(model_path)
+            lib_candidates = [
+                os.path.join(dir_name, "libnn_vehicle_color.so"),
+                os.path.join(dir_name, "vehicle_color.so"),
+                os.path.splitext(model_path)[0] + ".so",
+            ]
+            library_path = next((p for p in lib_candidates if os.path.isfile(p)), None)
 
         self._net = asnn("Electron")
         status = self._net.nn_init(library=library_path, model=model_path, level=0)
@@ -110,20 +113,31 @@ class _NpuColorBackend:
 SUPPORTED_COLOR_EXTENSIONS = (".pt", ".onnx", ".nb", ".so")
 
 
-def _resolve_color_model_name(raw_name: Optional[str], model_extension: str) -> str:
-    """Resolve the color model filename from config or active vehicle_text extension."""
+def _resolve_color_model(color_cfg: dict, model_extension: str) -> Tuple[str, Optional[str]]:
+    """(color model file, its .so library or None) for the active vehicle_text job type.
+
+    vehicle_text.yaml's color: block names the files per job type (color.onnx /
+    color.nb; a .so job uses the nb entry — the .so is only the .nb's library).
+    Without such an entry, falls back to color.model_name / vehicle_color<ext>.
+    """
     ext = model_extension.lower()
     if ext not in SUPPORTED_COLOR_EXTENSIONS:
         raise ValueError(
             f"Unsupported vehicle_text extension '{model_extension}' for auto color selection "
             f"(supported: {SUPPORTED_COLOR_EXTENSIONS})"
         )
-    name = (raw_name or "").strip()
+    key = ext.lstrip(".")
+    entry = color_cfg.get(key) or (color_cfg.get("nb") if key == "so" else None)
+    if isinstance(entry, dict) and entry.get("model"):
+        return str(entry["model"]), entry.get("library")
+    if isinstance(entry, str) and entry:
+        return entry, None
+    name = (color_cfg.get("model_name") or "").strip()
     if not name or name.lower() == "auto":
-        return f"vehicle_color{ext}"
+        return f"vehicle_color{ext}", None
     if not os.path.splitext(name)[1]:
-        return f"{name}{ext}"
-    return name
+        return f"{name}{ext}", None
+    return name, None
 
 
 def _resolve_color_model_path(models_dir: str, model_name: str) -> Optional[str]:
@@ -138,7 +152,7 @@ def _resolve_color_model_path(models_dir: str, model_name: str) -> Optional[str]
     return None
 
 
-def _load_classifier(models_dir: str, model_name: str, device: str):
+def _load_classifier(models_dir: str, model_name: str, device: str, library: Optional[str] = None):
     model_path = _resolve_color_model_path(models_dir, model_name)
     if not model_path:
         raise FileNotFoundError(
@@ -148,7 +162,9 @@ def _load_classifier(models_dir: str, model_name: str, device: str):
     if ext not in SUPPORTED_COLOR_EXTENSIONS:
         raise ValueError(f"Unsupported color model extension '{ext}' for {model_path}")
     if ext in (".nb", ".so"):
-        return _NpuColorBackend(model_path)
+        # The library sits next to its .nb model.
+        library_path = os.path.join(os.path.dirname(model_path), library) if library else None
+        return _NpuColorBackend(model_path, library_path=library_path)
     return VehicleColorClassifier(model_path, device=device)
 
 
@@ -283,11 +299,12 @@ class ColorScheduler:
     def _apply_config(self, color_cfg: dict) -> None:
         new_enabled = bool(color_cfg.get("enabled", False))
         try:
-            new_model = _resolve_color_model_name(color_cfg.get("model_name"), self._model_extension)
+            new_model, new_library = _resolve_color_model(color_cfg, self._model_extension)
         except ValueError as exc:
             log.warning("%s; disabling vehicle color detection", exc)
             self._enabled = False
             self._model_name = ""
+            self._library = None
             self._device = str(color_cfg.get("device", "auto"))
             self._disable_locked()
             return
@@ -300,9 +317,11 @@ class ColorScheduler:
 
         model_changed = (
             getattr(self, "_model_name", None) != new_model
+            or getattr(self, "_library", None) != new_library
             or getattr(self, "_device", None) != new_device
         )
         self._model_name = new_model
+        self._library = new_library
         self._device = new_device
         self._enabled = new_enabled
 
@@ -317,7 +336,9 @@ class ColorScheduler:
     def _ensure_started_locked(self) -> None:
         if self._classifier is None:
             try:
-                self._classifier = _load_classifier(self._models_dir, self._model_name, self._device)
+                self._classifier = _load_classifier(
+                    self._models_dir, self._model_name, self._device, self._library
+                )
                 log.info(
                     "vehicle_text color classifier enabled (model=%s, format=%s)",
                     self._model_name,

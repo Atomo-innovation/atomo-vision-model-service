@@ -1,0 +1,72 @@
+# Vehicle pipeline — ONE worker for a job's vehicle models.
+#
+# When a job has any of vehicle / vehicle_color / vehicle_text, those (plus
+# number_plate, if present) run in one worker on one RTSP reader instead of
+# one worker each:
+#
+#   frame -> vehicle detector (9 classes, ONE run) -> ByteTrack (ONE tracker)
+#         -> per vehicle, only for models in the job:
+#              vehicle_color -> colour votes
+#              vehicle_text  -> plate + text OCR (PP-OCR)
+#              number_plate  -> plate box + read, matched to the vehicle box
+#                               that holds the plate centre
+#              vehicle       -> no-seatbelt / no_helmet boxes as violations
+#         -> once a vehicle leaves (vehicle.yaml publish:), one fixed vehicle
+#            message for it (models/vehicle_event.py): fields of models not in
+#            the job are null.
+#
+# number_plate alone (no vehicle model in the job) keeps its own worker.
+# Detector/tracker/relink/publish/colour-vote settings come from
+# config/models/vehicle.yaml; OCR settings from vehicle_text.yaml; plate
+# settings from number_plate.yaml — this file only holds what is new.
+
+enabled: true   # false -> every vehicle model runs as its own worker again (old behaviour)
+
+# ---------------------------------------------------------------- runtimes
+# The whole pipeline runs on ONE runtime: the first of runtime_priority that
+# any of the job's vehicle assignments uses (by its model_name extension),
+# e.g. vehicle.nb + vehicle_color.nb + vehicle_text.nb -> nb. Every part then
+# loads that runtime's files below (the job's own model_name files are not
+# used in pipeline mode). Folders: detector -> models/vehicle/, color ->
+# models/vehicle_color/, number_plate -> models/number_plate/; ocr is the
+# vehicle_text.yaml block (onnx: CPU, nb: NPU) — there is no .pt OCR.
+runtime_priority: [nb, so, pt, onnx]
+runtimes:
+  pt:
+    detector: vehicle.pt
+    color: {model: vehicle_color.pt}
+    ocr: onnx
+    number_plate: number_plate.pt
+  onnx:                                   # CPU, onnxruntime (via Ultralytics for the YOLO models)
+    detector: vehicle.onnx                # exported from vehicle.pt
+    color: {model: vehicle_color.onnx}
+    ocr: onnx
+    number_plate: number_plate.onnx       # exported from number_plate.pt
+  nb:                                     # A311D NPU
+    detector: vehicle.nb                  # + vehicle.yaml nb.library_file
+    color: {model: vehicle_color.nb, library: libnn_vehicle_color.so}
+    ocr: nb
+    number_plate: number_plate.nb         # + number_plate.yaml nb.library_file
+  so:                                     # A311D NPU, .so libraries
+    detector: vehicle.so
+    color: {model: vehicle_color.nb, library: libnn_vehicle_color.so}   # the .so is the .nb's companion library
+    ocr: nb
+    number_plate: number_plate.so
+
+# Classes of the vehicle detector that are vehicles (tracked + published).
+vehicle_classes: [bus, car, motorcycle, truck, other]
+
+violations:
+  # Detector class -> published violation_type, and the vehicle classes it
+  # can belong to. A violation box is given to the smallest vehicle box
+  # holding its centre; for no_helmet the motorcycle box is first grown
+  # upwards by helmet_head_ratio x its height (the rider's head is above it).
+  classes:
+    no-seatbelt: {violation_type: no_seat_belt, vehicles: [car, truck, bus]}
+    no_helmet: {violation_type: no_helmet, vehicles: [motorcycle]}
+  helmet_head_ratio: 0.5
+  min_frames: 2          # seen on at least this many frames to be published
+
+# camera_model_assign_id of the published vehicle: the first of these the
+# job has.
+assign_id_priority: [vehicle, vehicle_color, vehicle_text, number_plate]

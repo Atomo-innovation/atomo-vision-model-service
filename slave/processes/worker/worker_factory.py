@@ -127,3 +127,31 @@ def create_worker(
         return worker_cls(face_controller=face_controller, **common_kwargs)
 
     return worker_cls(**common_kwargs)
+
+
+def create_vehicle_pipeline_worker(job: JobConfig, assignments, pipeline_config: dict, configs: dict, services: WorkerServices):
+    """One VehiclePipelineWorker for all of a job's vehicle models (see
+    config/models/vehicle_pipeline.yaml) — same per-worker plumbing as
+    create_worker(), under its own worker key."""
+    from slave.processes.worker.models.vehicle_pipeline.vehicle_pipeline_worker import VehiclePipelineWorker
+
+    worker_key = worker_key_for(job.job_id, "vehicle_pipeline")
+    video_manager = VideoManager(
+        job_id=worker_key,
+        video_uploader=services.video_uploader,
+        temp_dir=services.video_temp_dir,
+        segment_seconds=services.video_segment_seconds,
+        fps=services.video_fps,
+    )
+    return VehiclePipelineWorker(
+        job=job,
+        assignments=assignments,
+        worker_key=worker_key,
+        pipeline_config=pipeline_config,
+        configs=configs,
+        models_root=services.models_root,
+        detection_publisher=services.detection_publisher,
+        frame_uploader=services.frame_uploader,
+        video_manager=video_manager,
+        identity=WorkerIdentity(device_id=services.device_id, device_name=services.device_name),
+    )

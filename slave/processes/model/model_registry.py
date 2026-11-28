@@ -3,8 +3,9 @@
 The registry is deliberately dumb: it just maps supported combinations
 to the callable that builds the right worker class. `person`,
 standalone `face`, `safety`, standalone `fire`, standalone
-`number_plate`, standalone `vehicle`, and standalone `vehicle_text`
-(.onnx/.nb only) are registered today; `fight`
+`number_plate`, standalone `vehicle`, standalone `vehicle_text`
+(.onnx/.nb only) and standalone `vehicle_color` (.onnx/.nb/.so) are
+registered today; `fight`
 is rejected until implemented (CLAUDE.md §7, §22 — note
 Face/Safety/Fire/Number-Plate/Vehicle/Vehicle-Text going standalone here are
 deliberate, explicitly-requested exceptions to CLAUDE.md's "Person
@@ -52,7 +53,7 @@ class ModelRegistry: # model registry is a class that maintains a mapping of sup
 
 
 def build_default_registry() -> ModelRegistry: # build_default_registry is a function that creates and returns a ModelRegistry instance pre-populated with the current worker builders for the "person"/"face"/"safety"/"fire"/"number_plate" model types and their supported extensions (".pt", ".nb", ".so"). It imports the necessary worker classes and registers them with the registry, allowing the system to retrieve the appropriate worker builder based on the model type and extension.
-    """Registry wired with the current Person + standalone Face/Safety/Fire/Number-Plate/Vehicle/Vehicle-Text worker builders."""
+    """Registry wired with the current Person + standalone Face/Safety/Fire/Number-Plate/Vehicle/Vehicle-Text/Vehicle-Color worker builders."""
     from slave.processes.worker.models.person.pt.person_pt_worker import PersonPtWorker
     from slave.processes.worker.models.person.nb.person_nb_worker import PersonNbWorker
     from slave.processes.worker.models.person.so.person_so_worker import PersonSoWorker
@@ -74,7 +75,6 @@ def build_default_registry() -> ModelRegistry: # build_default_registry is a fun
     from slave.processes.worker.models.vehicle.so.vehicle_so_worker import VehicleSoWorker
     from slave.processes.worker.models.vehicle_text.onnx.vehicle_text_onnx_worker import VehicleTextOnnxWorker
     from slave.processes.worker.models.vehicle_text.nb.vehicle_text_nb_worker import VehicleTextNbWorker
-    from slave.processes.worker.models.vehicle_color.pt.vehicle_color_pt_worker import VehicleColorPtWorker
     from slave.processes.worker.models.vehicle_color.nb.vehicle_color_nb_worker import VehicleColorNbWorker
     from slave.processes.worker.models.vehicle_color.so.vehicle_color_so_worker import VehicleColorSoWorker
     from slave.processes.worker.models.vehicle_color.onnx.vehicle_color_onnx_worker import VehicleColorOnnxWorker
@@ -101,8 +101,7 @@ def build_default_registry() -> ModelRegistry: # build_default_registry is a fun
     registry.register("vehicle", ".so", VehicleSoWorker)   # same not-yet-functional SoRuntime caveat as every other .so path.
     registry.register("vehicle_text", ".onnx", VehicleTextOnnxWorker)   # standalone vehicle-text OCR job (EdgeOCR port: YOLO + PP-OCR English/Hindi/Gujarati), all on CPU. One detection per vehicle, not per frame.
     registry.register("vehicle_text", ".nb", VehicleTextNbWorker)       # same, on the A311D NPU via EdgeOCR's own asnn runner (int16 graphs + CPU tails), no face_controller.
-    registry.register("vehicle_color", ".pt", VehicleColorPtWorker)     # standalone vehicle color job (.pt PyTorch YOLO + color classification)
-    registry.register("vehicle_color", ".nb", VehicleColorNbWorker)     # standalone vehicle color job on A311D NPU (.nb model)
-    registry.register("vehicle_color", ".so", VehicleColorSoWorker)     # standalone vehicle color job on A311D NPU (.so library)
-    registry.register("vehicle_color", ".onnx", VehicleColorOnnxWorker) # standalone vehicle color job on CPU (.onnx runtime)
+    registry.register("vehicle_color", ".onnx", VehicleColorOnnxWorker) # standalone vehicle color job — vehicle_text's YOLO11n vehicles + vehicle_color.onnx classifier, all on CPU. One detection per frame.
+    registry.register("vehicle_color", ".nb", VehicleColorNbWorker)     # same, on the A311D NPU (vehicle_text.nb + vehicle_color.nb, each with its .so library).
+    registry.register("vehicle_color", ".so", VehicleColorSoWorker)     # same .nb + .so pairs as .nb — the .so files are the .nb models' companion libraries.
     return registry # returns the fully constructed ModelRegistry instance with the registered worker builders for the supported (model_type, model_extension) combinations.

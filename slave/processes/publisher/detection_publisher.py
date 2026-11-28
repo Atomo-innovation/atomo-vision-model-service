@@ -6,6 +6,7 @@ from slave.logging.logger import get_logger
 from slave.processes.detection.detection_message import build_detection_message
 from slave.processes.detection.detection_result import DetectionResult
 from slave.processes.publisher.publisher import Publisher
+from slave.utils.json_utils import to_json_safe
 
 log = get_logger(__name__)
 
@@ -43,3 +44,11 @@ class DetectionPublisher:
             self._publisher.publish(self._subject, message) # publish is a method of the Publisher class that sends the message to the specified NATS subject
         except Exception:
             log.exception("failed to publish detection for job_id=%s frame_id=%s", result.job_id, result.frame_id) # log the exception if publishing fails
+
+    def publish_message(self, message: dict) -> None:
+        """Publish an already-built detection payload (the vehicle pipeline's
+        fixed vehicle message, models/vehicle_event.py) on the same subject."""
+        try:
+            self._publisher.publish(self._subject, to_json_safe(message))
+        except Exception:
+            log.exception("failed to publish message for job_id=%s frame_id=%s", message.get("job_id"), message.get("frame_id"))

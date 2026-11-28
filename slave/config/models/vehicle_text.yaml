@@ -105,20 +105,28 @@ publish:
 
 # ---------------------------------------------------------------- vehicle color (dynamic ON/OFF toggle)
 # When enabled: true, classifies vehicle color in parallel on a background thread
-# using the SAME tracked vehicle boxes from vehicle_text's YOLO detector (zero
-# duplicate vehicle detection). The color model format is automatically selected
-# from the active vehicle_text model (.pt -> .pt, .onnx -> .onnx, .nb -> .nb,
-# .so -> .so). Editing `enabled` (or thresholds) takes effect dynamically within
-# `poll_interval_seconds` without restarting the service.
+# (color_scheduler.py) using the SAME tracked vehicle boxes from vehicle_text's
+# YOLO detector — no second vehicle detection. Each vehicle is classified up to
+# max_attempts times and the votes are merged into its one published reading.
+# Editing this block takes effect within poll_interval_seconds, no restart.
+#
+# The color model follows the job type: the onnx:/nb: entry below matching the
+# job's model_name extension is used, and its runner is picked from the file's
+# extension (.onnx -> onnxruntime, .nb -> NPU). Files are resolved against
+# processes/worker/models/vehicle_color/ (the color model's own folder).
 color:
   enabled: false
-  confidence_threshold: 0.40
-  min_crop_pixels: 40
-  device: auto
-  poll_interval_seconds: 2.0
-  queue_size: 8
-  max_attempts: 3
-  regrow_ratio: 1.4
+  confidence_threshold: 0.40  # a vote below this is ignored
+  min_crop_pixels: 40         # vehicles smaller than this (w or h, px) are not classified
+  poll_interval_seconds: 2.0  # how often this file is re-read for changes
+  queue_size: 8               # pending color jobs; beyond this new crops are dropped
+  max_attempts: 3             # classifications per tracked vehicle
+  regrow_ratio: 1.4           # re-classify once the vehicle box has grown this much
+  onnx:                       # .onnx job — CPU (onnxruntime)
+    model: vehicle_color.onnx
+  nb:                         # .nb job — A311D NPU; .so is the .nb's companion library
+    model: vehicle_color.nb
+    library: libnn_vehicle_color.so
 
 # ---------------------------------------------------------------- .onnx job
 # model_name: vehicle_text.onnx — everything on CPU (onnxruntime).

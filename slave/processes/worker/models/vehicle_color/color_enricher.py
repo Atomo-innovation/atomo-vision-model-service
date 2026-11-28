@@ -130,6 +130,14 @@ class VehicleColorEnricher:
 
         return enriched
 
+    @property
+    def classify(self):
+        """(color, confidence) of one vehicle crop, or None when color is
+        disabled/unavailable — VehicleColorEvents' classify argument."""
+        if not self.enabled or self._classifier is None:
+            return None
+        return self._classifier.classify
+
     def release(self) -> None:
         if self._classifier is not None:
             self._classifier.release()

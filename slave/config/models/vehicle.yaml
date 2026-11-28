@@ -3,9 +3,10 @@
 # model behaviour (classes, thresholds, resolution) belongs here.
 #
 # Standalone model (own jobs.yaml entries with model_type: "vehicle"),
-# same shape as config/models/fire.yaml — not person-chained/triggered,
-# and does NOT get a face_controller attached (worker_factory.py only
-# attaches one to "person"/"safety").
+# not person-chained/triggered, and does NOT get a face_controller attached
+# (worker_factory.py only attaches one to "person"/"safety"). Vehicles are
+# tracked and each one is published once (see tracker:/publish: below),
+# not on every frame.
 
 model_type: vehicle
 
@@ -37,11 +38,6 @@ listsize: 73           # num_classes(9) + 64 DFL channels (reg_max=16) — only 
 # the worker — never published, uploaded, or recorded. Set per
 # explicit request: only vehicle-type classes (car/bus/truck/
 # motorcycle) and the "other" hard-negative are meant to be visible.
-ignore_classes:
-  - Helmet
-  - no_helmet
-  - seatbelt
-  - no-seatbelt
 
 thresholds:
   # Placeholder — copied from fire.yaml's defaults, not yet tuned
@@ -98,14 +94,63 @@ so:
   device_id: 0
 
 color:
-  # Vehicle color recognition toggle. When enabled, detected vehicles are
-  # cropped and classified into 9 color classes (black, blue, brown, gray,
-  # green, orange, red, white, yellow).
+  # Vehicle color recognition toggle. When enabled, each tracked vehicle
+  # (car/bus/truck/motorcycle) is cropped and classified into 9 color
+  # classes (black, blue, brown, gray, green, orange, red, white, yellow)
+  # up to max_attempts times, and the reads are voted.
   # Set false to completely disable color recognition and free all associated memory.
   enabled: true
   model_name: vehicle_color.pt   # or vehicle_color.nb on A311D NPU
-  confidence_threshold: 0.40
-  min_crop_pixels: 40
+  confidence_threshold: 0.40     # a read below this is not voted; no votes -> published with color: null
+  min_crop_pixels: 40            # vehicles smaller than this (w or h, px) are not classified
   device: auto
+  max_attempts: 3                # color reads per tracked vehicle, then voted (sum of confidences)
+  regrow_ratio: 1.4              # re-classify once the vehicle box has grown this much (came closer)
+
+# ---------------------------------------------------------------- tracking
+# Same publish-once tracking as config/models/vehicle_color.yaml (shared
+# code: vehicle_color/vehicle_color_events.py). ByteTrack gives each
+# vehicle a stable track_id; each vehicle is published ONCE, not on every
+# frame. The tracker's high threshold is the detector's own obj_thresh
+# (thresholds: for .pt, nb: for .nb/.so).
+tracker:
+  low_thresh: 0.1
+  new_track_thresh: 0.25
+  match_thresh: 0.8
+  track_buffer: 30
+  # Per-class NMS lets one vehicle come out as both "bus" and "truck" (two
+  # tracks, published twice); a second, class-agnostic NMS at this IoU
+  # keeps only the best-scoring class per physical box.
+  agnostic_nms_iou: 0.7
+  # Boxes within this many px of the frame border (a vehicle cut off by the
+  # frame) only keep its track alive: the published frame and the color
+  # reads come from fully visible sightings.
+  edge_margin_px: 4
+
+# At low fps a fast vehicle moves too far between frames for ByteTrack's
+# IoU match and gets a NEW track_id a frame later. A new track appearing
+# within max_gap_seconds of another vehicle vanishing, near where it was
+# (center distance <= max_distance_ratio x that box's longer side) and of
+# similar size (area ratio <= max_size_ratio) continues that vehicle.
+# max_gap_seconds must stay below publish.lost_seconds. Tradeoff: two
+# vehicles following each other within max_gap_seconds may be merged.
+relink:
+  max_gap_seconds: 1.5
+  max_distance_ratio: 1.0
+  max_size_ratio: 2.5
+
+# One MinIO frame + one NATS detection per vehicle, on the frame where it
+# was seen largest, carrying its voted class and color.
+publish:
+  lost_seconds: 2.0           # vehicle unseen this long -> publish it
+  max_wait_seconds: 30        # ...or after watching it this long, even if still visible (parked)
+  forget_after_seconds: 120   # drop a published vehicle's state (keeps memory flat);
+                              # until then the same track_id is never published again
+  # A parked vehicle (or a static false detection) that comes back under a
+  # NEW track_id at (almost) the same box within same_spot_seconds is not
+  # published again (the window restarts each time). Tradeoff: a different
+  # vehicle stopping at exactly the same spot inside the window isn't either.
+  same_spot_iou: 0.6
+  same_spot_seconds: 300
 
 

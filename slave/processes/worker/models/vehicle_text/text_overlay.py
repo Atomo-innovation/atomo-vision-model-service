@@ -94,11 +94,15 @@ class Overlay:
         tag += " reading..." if pending and not lines else ""
         cv2.putText(frame, tag, (x1, max(16, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX,
                     self.font_size / 32, color, self.thickness, cv2.LINE_AA)
-        y = y2 + 4
+        self.draw_lines(frame, x1, y2 + 4, lines)
+
+    def draw_lines(self, frame: np.ndarray, x: int, y: int, lines: list[Line]) -> int:
+        """Stack up to max_lines text labels (any script) from (x, y) down; returns the y below them."""
         for line in lines[: self.max_lines]:
             label = self._label(line)
-            _blend(frame, label, x1, y)
+            _blend(frame, label, x, y)
             y += label.shape[0] + 2
+        return y
 
     def draw_hud(self, frame: np.ndarray, hud: str) -> None:
         cv2.putText(frame, hud, (10, 10 + self.font_size), cv2.FONT_HERSHEY_SIMPLEX,

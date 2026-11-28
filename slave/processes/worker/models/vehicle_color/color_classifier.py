@@ -46,6 +46,10 @@ class VehicleColorClassifier:
         device: str = "auto",
         class_names: Optional[Dict[int, str]] = None,
         input_size: Tuple[int, int] = (224, 224),
+        library_path: Optional[str] = None,
+        level: int = 0,
+        device_id: int = 0,
+        board: str = "Electron",
     ) -> None:
         if not os.path.isfile(model_path):
             raise FileNotFoundError(f"Vehicle color model not found: {model_path}")
@@ -54,6 +58,11 @@ class VehicleColorClassifier:
         self._device = None if device == "auto" else device
         self._input_size = input_size
         self._class_names = class_names or DEFAULT_COLOR_NAMES
+        # .nb only: the companion library, and the NPU runtime options.
+        self._library_path = library_path
+        self._level = level
+        self._device_id = device_id
+        self._board = board
 
         _, ext = os.path.splitext(self._model_path)
         self._ext = ext.lower()
@@ -75,32 +84,40 @@ class VehicleColorClassifier:
             self._backend = "onnx"
             import onnxruntime as ort  # lazy import
 
-            providers = (
+            wanted = (
                 ["CUDAExecutionProvider", "CPUExecutionProvider"]
-                if self._device != "cpu"
+                if self._device not in ("cpu", None)
                 else ["CPUExecutionProvider"]
             )
+            providers = [p for p in wanted if p in ort.get_available_providers()] or ["CPUExecutionProvider"]
             self._model = ort.InferenceSession(self._model_path, providers=providers)
             self._input_name = self._model.get_inputs()[0].name
 
         elif self._ext in (".nb", ".so"):
             self._backend = "npu"
-            dir_name = os.path.dirname(self._model_path)
-            lib_candidates = [
-                os.path.join(dir_name, "libnn_vehicle_color.so"),
-                os.path.join(dir_name, "vehicle_color.so"),
-                os.path.splitext(self._model_path)[0] + ".so",
-            ]
-            library_path = next((p for p in lib_candidates if os.path.isfile(p)), None)
+            library_path = self._library_path
+            if not library_path:
+                dir_name = os.path.dirname(self._model_path)
+                lib_candidates = [
+                    os.path.join(dir_name, "libnn_vehicle_color.so"),
+                    os.path.join(dir_name, "vehicle_color.so"),
+                    os.path.splitext(self._model_path)[0] + ".so",
+                ]
+                library_path = next((p for p in lib_candidates if os.path.isfile(p)), None)
             try:
                 from slave.runtimes.npu.nb_runtime import NbRuntime
                 self._model = NbRuntime(
-                    self._model_path, library_path=library_path, board="Electron", output_tensor=1,
+                    self._model_path,
+                    library_path=library_path,
+                    level=self._level,
+                    device_id=self._device_id,
+                    board=self._board,
+                    output_tensor=1,
                 )
             except Exception:
                 from asnn.api import asnn
-                self._model = asnn("Electron")
-                self._model.nn_init(library=library_path, model=self._model_path, level=0)
+                self._model = asnn(self._board)
+                self._model.nn_init(library=library_path, model=self._model_path, level=self._level)
         else:
             raise ValueError(
                 f"Unsupported model extension '{self._ext}'. Expected .pt, .onnx, or .nb/.so"
@@ -129,17 +146,17 @@ class VehicleColorClassifier:
             return color_name, top1_conf
 
         elif self._backend == "onnx":
-            resized = cv2.resize(crop, self._input_size)
-            rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-            mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-            std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-            norm = (rgb - mean) / std
-            tensor = np.transpose(norm, (2, 0, 1))[np.newaxis, ...]
-
+            # Same preprocessing as Ultralytics' classify predict, which the
+            # .onnx is exported from: short side resized, center crop, RGB
+            # in [0, 1] — no ImageNet mean/std (Ultralytics uses 0/1).
+            tensor = self._center_crop_tensor(crop)
             outputs = self._model.run(None, {self._input_name: tensor})
             logits = outputs[0][0]
-            exp_logits = np.exp(logits - np.max(logits))
-            probs = exp_logits / np.sum(exp_logits)
+            if np.all(logits >= 0) and abs(float(np.sum(logits)) - 1.0) < 1e-2:
+                probs = logits  # the export already ends in Softmax
+            else:
+                exp_logits = np.exp(logits - np.max(logits))
+                probs = exp_logits / np.sum(exp_logits)
             top1_idx = int(np.argmax(probs))
             top1_conf = float(probs[top1_idx])
             color_name = self._class_names.get(top1_idx, str(top1_idx))
@@ -165,6 +182,20 @@ class VehicleColorClassifier:
             return color_name, top1_conf
 
         return "unknown", 0.0
+
+    def _center_crop_tensor(self, crop: np.ndarray) -> np.ndarray:
+        size_w, size_h = self._input_size
+        h, w = crop.shape[:2]
+        scale = max(size_w / w, size_h / h)
+        resized = cv2.resize(
+            crop, (max(size_w, round(w * scale)), max(size_h, round(h * scale))),
+            interpolation=cv2.INTER_LINEAR,
+        )
+        y0 = (resized.shape[0] - size_h) // 2
+        x0 = (resized.shape[1] - size_w) // 2
+        resized = resized[y0:y0 + size_h, x0:x0 + size_w]
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        return rgb.transpose(2, 0, 1)[np.newaxis].astype(np.float32) / 255.0
 
     def classify_batch(self, crops: List[np.ndarray]) -> List[Tuple[str, float]]:
         """Classify a list of cropped vehicle images."""
@@ -196,8 +227,11 @@ class VehicleColorClassifier:
         return [self.classify(crop) for crop in crops]
 
     def release(self) -> None:
-        """Release underlying model resources."""
+        """Release underlying model resources (frees the NPU graph for .nb)."""
+        release_fn = getattr(self._model, "release", None) if self._backend == "npu" else None
         self._model = None
+        if release_fn:
+            release_fn()
 
 
 def main() -> None:
