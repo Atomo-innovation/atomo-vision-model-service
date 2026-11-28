@@ -57,6 +57,19 @@ Drop weight/library files directly in
 `person.so`) — see the README there for the full layout. `model_name`
 in the job message must match the filename dropped there.
 
+## Vehicle Text (model_type: vehicle_text)
+
+Reads text on vehicles — plate, names, slogans — in English, Hindi and
+Gujarati (port of EdgeOCR's PP-OCR pipeline). Unlike the per-frame models
+it publishes **one detection per vehicle**, once its reading is final, with
+`plate_number`, `text` and per-line `script` in the detection.
+
+- `model_name: vehicle_text.onnx` — everything on CPU (onnxruntime).
+- `model_name: vehicle_text.nb` — A311D NPU via the board's `asnn` package.
+- Settings: `config/models/vehicle_text.yaml`. Files and layout:
+  `processes/worker/models/vehicle_text/README.md` (weights live in its
+  `onnx/` and `nb/` folders, not flat like the other models).
+
 ## Adding the Amlogic A311D NPU SDK
 
 `.nb` and `.so` inference go through `runtimes/npu/nb_runtime.py` and

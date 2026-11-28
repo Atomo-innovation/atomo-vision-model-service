@@ -53,6 +53,10 @@ class PlateEnricher:
         )
 
         self._publish_queue: List[Detection] = []
+        # PlateTracker track_id of each Detection the last enrich() returned,
+        # same order — read by the vehicle pipeline (plate_track_id); the
+        # number_plate workers' own output is unchanged.
+        self.last_track_ids: List[int] = []
         self._ocr = None
         if bool(ocr_cfg.get("enabled", True)):
             kwargs = {}
@@ -76,6 +80,7 @@ class PlateEnricher:
             timestamp=float(frame_timestamp),
         )
         enriched: List[Detection] = []
+        self.last_track_ids = []
         self._publish_queue = []
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if self._ocr is not None and pairs else None
 
@@ -113,6 +118,7 @@ class PlateEnricher:
                 },
             )
             enriched.append(enriched_detection)
+            self.last_track_ids.append(track.track_id)
             if confirmed and not track.published:
                 track.published = True
                 self._publish_queue.append(enriched_detection)

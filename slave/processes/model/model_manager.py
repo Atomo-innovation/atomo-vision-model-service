@@ -31,6 +31,11 @@ from slave.processes.device.runtime_status import RuntimeStatus
 from slave.processes.model.model_registry import ModelRegistry
 from slave.processes.model.model_resolver import ResolvedModel, resolve
 from slave.processes.worker import worker_factory
+from slave.processes.worker.models.vehicle_pipeline.vehicle_pipeline_parts import (
+    PIPELINE_CONFIG_FILE,
+    load_yaml,
+    pipeline_assignments,
+)
 from slave.processes.worker.worker_factory import WorkerServices
 
 log = get_logger(__name__)
@@ -54,7 +59,12 @@ class ModelManager:
         built: List[tuple] = []
         if self._runtime_status is not None:
             self._runtime_status.reset_failures(job.job_id)
+        # A job's vehicle models share one worker (vehicle_pipeline.yaml): it
+        # is built once, for the group's first assignment, and stands for all.
+        pipeline = pipeline_assignments(job, load_yaml(self._config_root, PIPELINE_CONFIG_FILE))
         for assignment in job.model_assignments:
+            if pipeline and assignment in pipeline and assignment != pipeline[0]:
+                continue
             worker = self.build_one(job, assignment)
             if worker is None:
                 continue
@@ -70,6 +80,12 @@ class ModelManager:
         never affected.
         """
         try:
+            # Also the watchdog's restart path: a dead pipeline is recorded
+            # under its group's first assignment, so it is rebuilt whole here.
+            pipeline_config = load_yaml(self._config_root, PIPELINE_CONFIG_FILE)
+            pipeline = pipeline_assignments(job, pipeline_config)
+            if assignment in pipeline:
+                return self._build_pipeline(job, pipeline, pipeline_config)
             resolved: ResolvedModel = resolve(assignment, job.job_id, self._config_root)
             worker_cls = self._registry.get(resolved.model_type, resolved.model_extension)
             model_config = self._load_model_config(resolved.model_config_path)
@@ -85,6 +101,18 @@ class ModelManager:
                     job.job_id, assignment.model_type, assignment.model_name, f"{type(exc).__name__}: {exc}"
                 )
             return None
+
+    def _build_pipeline(self, job: JobConfig, assignments, pipeline_config: dict) -> object:
+        types = {a.model_type for a in assignments}
+        configs = {"vehicle": load_yaml(self._config_root, "vehicle.yaml")}
+        for model_type in ("vehicle_text", "number_plate"):
+            if model_type in types:
+                configs[model_type] = load_yaml(self._config_root, f"{model_type}.yaml")
+        log.info(
+            "job %s: vehicle pipeline for %s",
+            job.job_id, ", ".join(f"{a.model_type}={a.model_name}" for a in assignments),
+        )
+        return worker_factory.create_vehicle_pipeline_worker(job, assignments, pipeline_config, configs, self._services)
 
     @staticmethod
     def _load_model_config(path: str) -> dict:

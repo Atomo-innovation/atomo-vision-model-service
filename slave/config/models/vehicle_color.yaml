@@ -1,0 +1,163 @@
+# Static model configuration for model_type: vehicle_color.
+# jobs.yaml carries only *which* job/stream/model runs — permanent
+# model behaviour (classes, thresholds, model files) belongs here.
+#
+# Standalone model (own jobs.yaml entries with model_type: "vehicle_color"),
+# not person-chained/triggered, no face_controller. Two networks per job:
+#   1. vehicle detector — the SAME YOLO11n (COCO) model vehicle_text uses
+#      (vehicle_text.onnx / .nb), NOT vehicle.pt: vehicle_color has nothing
+#      to do with the 9-class helmet/seatbelt `vehicle` model.
+#   2. color classifier — vehicle_color.onnx / .nb, run on each vehicle crop.
+# No OCR. Vehicles are tracked (ByteTrack) and each one is published once,
+# with its voted color — not on every frame (see tracker:/publish: below).
+#
+# The job's model_name only picks the job type by its extension
+# (vehicle_color.onnx | vehicle_color.nb | vehicle_color.so); the actual
+# files are named in the onnx:/nb:/so: blocks below and resolved flat
+# against processes/worker/models/vehicle_color/ (vehicle_color keeps its
+# own copies of the vehicle_text YOLO files — they are not shared with
+# processes/worker/models/vehicle_text/).
+
+model_type: vehicle_color
+
+# Published in every Detection's "model_name" field sent to the Master
+# (NATS cam.detection) — see person.yaml's `display_name` comment for
+# why this must be the Master's ENUM/display string, not a filename.
+# Verify against the Master's model ENUM before relying on alerts.
+display_name: Vehicle Color
+
+# ---------------------------------------------------------------- vehicles
+# YOLO11n is the stock COCO model (80 classes); only these class indices
+# are kept — same mapping as vehicle_text.yaml's vehicle: block. Each
+# vehicle is published with this label as its class_name.
+vehicle:
+  classes:
+    2: car
+    3: motorcycle
+    5: bus
+    7: truck
+  confidence: 0.25      # tracker's high threshold (new/confirmed vehicles)
+  imgsz: 640            # .nb YOLO head is compiled fixed at 640 — do not change for .nb
+  nms_iou: 0.7          # same as vehicle_text: ByteTrack below handles the rest
+
+# ByteTrack (vehicle_text/vehicle_tracker.py) — a stable track_id per
+# vehicle, so each vehicle is color-classified a few times and published
+# once, not on every frame. Same values as vehicle_text.yaml's tracker:.
+tracker:
+  low_thresh: 0.1
+  new_track_thresh: 0.25
+  match_thresh: 0.8
+  track_buffer: 30
+  # Per-class NMS lets one auto-rickshaw/van come out as both "bus" and
+  # "truck" (two tracks, published twice); a second, class-agnostic NMS at
+  # this IoU keeps only the best-scoring class per physical box.
+  agnostic_nms_iou: 0.7
+  # Boxes within this many px of the frame border (a vehicle cut off by the
+  # frame) only keep its track alive: the published frame and the color
+  # reads come from fully visible sightings, so the cut-off half of a
+  # vehicle is never published as a vehicle of its own.
+  edge_margin_px: 4
+
+# At low fps (a 5 fps stream, or a busy board) a fast vehicle moves too far
+# between frames for ByteTrack's IoU match, so it gets a NEW track_id a
+# frame later. A new track that appears within max_gap_seconds of another
+# vehicle vanishing, near where it was (center distance <= max_distance_ratio
+# x that box's longer side) and of similar size (area ratio <= max_size_ratio)
+# continues that vehicle instead of being published as a second one.
+# max_gap_seconds must stay below publish.lost_seconds. Tradeoff: two
+# vehicles following each other within max_gap_seconds may be merged.
+relink:
+  max_gap_seconds: 1.5
+  max_distance_ratio: 1.0
+  max_size_ratio: 2.5
+
+# ---------------------------------------------------------------- publishing
+# One MinIO frame + one NATS detection per vehicle (vehicle_color_events.py),
+# on the frame where it was seen largest, carrying its voted color.
+publish:
+  lost_seconds: 2.0           # vehicle unseen this long -> publish it
+  max_wait_seconds: 30        # ...or after watching it this long, even if still visible (parked)
+  forget_after_seconds: 120   # drop a published vehicle's state (keeps memory flat);
+                              # until then the same track_id is never published again
+  # A parked vehicle (or a static false detection) that drops out longer
+  # than tracker.track_buffer comes back under a NEW track_id. A finished
+  # vehicle of the same class whose box overlaps one published within
+  # same_spot_seconds by >= same_spot_iou is that same thing: not
+  # published again (the window restarts each time, so a car parked for
+  # an hour is published once). Tradeoff: a different car stopping at
+  # exactly the same spot inside the window is not published either.
+  same_spot_iou: 0.6
+  same_spot_seconds: 300
+
+# ---------------------------------------------------------------- color
+# Order matches vehicle_color.pt's checkpoint `names` dict exactly
+# ({0: black, ..., 8: yellow}, task=classify, imgsz=224) — do not reorder.
+# The .nb was compiled from the same checkpoint.
+color:
+  classes:
+    - black
+    - blue
+    - brown
+    - gray
+    - green
+    - orange
+    - red
+    - white
+    - yellow
+  input_size: 224             # classifier input (square), from the checkpoint's imgsz
+  confidence_threshold: 0.40  # a read below this is not voted; no votes -> published with color: null
+  min_crop_pixels: 40         # vehicles smaller than this (w or h, px) are not classified
+  max_attempts: 3             # color reads per tracked vehicle, then voted (sum of confidences)
+  regrow_ratio: 1.4           # re-classify once the vehicle box has grown this much (came closer)
+
+# ---------------------------------------------------------------- .onnx job
+# model_name: vehicle_color.onnx — everything on CPU (onnxruntime), no
+# torch needed. vehicle_color.onnx is exported from vehicle_color.pt
+# (Ultralytics, imgsz=224, opset 12; ends in Softmax) — its top-1 matched
+# the .pt on all 225 calib images. Re-export if the .pt is retrained.
+onnx:
+  threads: 2                  # onnxruntime intra-op threads, per model
+  yolo: vehicle_text.onnx
+  color:
+    model: vehicle_color.onnx
+
+# ---------------------------------------------------------------- .nb job
+# model_name: vehicle_color.nb — Amlogic A311D NPU. The YOLO settings
+# are vehicle_text.yaml's nb.yolo block (board-validated EdgeOCR profile):
+# input_scale undoes the 0-1 normalization the graph was compiled with,
+# and DFL box decoding runs in NumPy (see vehicle_text/ocr_runtime.py).
+# Each .so file here is only the companion library of its .nb model.
+nb:
+  yolo:
+    backend: asnn
+    nb: vehicle_text.nb
+    library: vehicle_text.so
+    input_scale: 255
+    postprocess: yolo_dfl
+  color:
+    model: vehicle_color.nb
+    library: libnn_vehicle_color.so
+  # Amlogic A311D NPU runtime options for the color graph (see
+  # runtimes/npu/nb_runtime.py) — same physically-confirmed board values
+  # as person.yaml's nb: block; re-verify if deployed to a different board.
+  level: 0
+  device_id: 0
+  board: Electron
+
+# ---------------------------------------------------------------- .so job
+# model_name: vehicle_color.so — the .so files are the .nb models'
+# companion libraries, not standalone models, so this job runs exactly
+# the same .nb + .so pairs on the NPU as the nb: block above.
+so:
+  yolo:
+    backend: asnn
+    nb: vehicle_text.nb
+    library: vehicle_text.so
+    input_scale: 255
+    postprocess: yolo_dfl
+  color:
+    model: vehicle_color.nb
+    library: libnn_vehicle_color.so
+  level: 0
+  device_id: 0
+  board: Electron

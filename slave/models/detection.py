@@ -33,6 +33,18 @@ _CLASS_META: Dict[str, Tuple[str, Tuple[str, ...]]] = {
     "fire": ("fire_detected", ("severity",)),
     "smoke": ("smoke_detected", ()),
     "number_plate": ("number_plate_detected", ("plate_number", "plate_confidence")),
+    # One instance per vehicle, published once its reading is final — see
+    # processes/worker/models/vehicle_text/vehicle_text_events.py.
+    "vehicle_text": ("vehicle_text_detected", (
+        "vehicle_class", "track_id", "plate_number", "plate_confidence", "plate_reads",
+        "text", "lines", "language", "color", "color_confidence",
+    )),
+    "car": ("vehicle_detected", ("color", "color_confidence")),
+    "bus": ("vehicle_detected", ("color", "color_confidence")),
+    "truck": ("vehicle_detected", ("color", "color_confidence")),
+    "motorcycle": ("vehicle_detected", ("color", "color_confidence")),
+    "vehicle": ("vehicle_detected", ("color", "color_confidence")),
+    "other": ("vehicle_detected", ("color", "color_confidence")),
 }
 _DEFAULT_EVENT_TYPE = "{class_name}_detected"
 

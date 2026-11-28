@@ -1,0 +1,199 @@
+# Static model configuration for model_type: vehicle_text.
+# jobs.yaml carries only *which* job/stream/model runs — permanent
+# model behaviour (classes, thresholds, resolution, OCR/voting tuning)
+# belongs here, same convention as person.yaml/number_plate.yaml.
+#
+# Standalone model (own jobs.yaml entries with model_type: "vehicle_text"),
+# not person-chained/triggered, no face_controller. Ported from EdgeOCR
+# (~/EdgeOCR/fasttext_variant, config.json, PP-OCR engine): YOLO11n
+# vehicles -> ByteTrack -> PP-OCR text lines -> English/Hindi/Gujarati
+# CTC readers -> plate + text voting across frames. Values below are
+# EdgeOCR's own unless a comment says otherwise.
+#
+# Files are resolved against processes/worker/models/vehicle_text/:
+#   onnx: / nb: blocks -> that job type's own subfolder (onnx/ or nb/)
+#   recognizers.*.dict, language_id.model -> the vehicle_text/ folder itself
+
+model_type: vehicle_text
+
+# Published in every Detection's "model_name" field sent to the Master
+# (NATS cam.detection) — see person.yaml's `display_name` comment for
+# why this must be the Master's ENUM/display string, not a filename.
+# Verify against the Master's model ENUM before relying on alerts.
+display_name: Vehicle Text
+
+# ---------------------------------------------------------------- vehicles
+# YOLO11n is the stock COCO model (80 classes); only these class indices
+# are kept. Index -> label confirmed against EdgeOCR's models/meta.json.
+vehicle:
+  classes:
+    2: car
+    3: motorcycle
+    5: bus
+    7: truck
+  confidence: 0.25      # tracker's high threshold (new/confirmed vehicles)
+  imgsz: 640            # .nb YOLO head is compiled fixed at 640 — do not change for .nb
+  nms_iou: 0.7
+
+# ByteTrack (vehicle_tracker.py) — a stable track_id per vehicle, so each
+# vehicle is OCR'd a few times and published once.
+tracker:
+  low_thresh: 0.1
+  new_track_thresh: 0.25
+  match_thresh: 0.8
+  track_buffer: 30
+
+# ---------------------------------------------------------------- OCR
+# Scripts read on every text line; the most confident valid reading wins
+# (ppocr_reader.py choose()). Drop one here to save CPU/NPU time.
+languages: [english, hindi, gujarati]
+
+recognizers:
+  english:  {dict: vehicle_text_english_dict.txt}
+  hindi:    {dict: vehicle_text_hindi_dict.txt}
+  gujarati: {dict: vehicle_text_gujarati_dict.txt}
+
+ocr:
+  crop_padding: 0.04          # vehicle box grown by this fraction before OCR
+  min_word_height: 8          # px; shorter text lines are ignored
+  display_confidence: 0.7     # a line must reach this to be voted/published
+  min_display_chars: 2
+  max_jobs_per_batch: 4       # vehicle crops OCR'd together per batch
+  det_size: 640               # text detector input; .nb text detector is compiled at 640
+  det_thresh: 0.3
+  det_box_thresh: 0.6
+  det_unclip: 1.5
+  min_word_confidence: 0.5
+  hindi_min_confidence: 0.8     # a Hindi reading must be this sure to beat English
+  gujarati_min_confidence: 0.8  # same for Gujarati
+
+# fastText language tag (en/hi/gu/und) for each vehicle's text. Off:
+# fasttext-wheel needs numpy<2 (the venv has numpy 2.x), and on EdgeOCR's
+# own tp.mp4 run it tagged 0/83 vehicles — vehicle text is usually shorter
+# than min_letters. Each line still carries the script it was read with.
+language_id:
+  enabled: false
+  model: vehicle_text_lid.ftz
+  min_letters: 10
+  min_probability: 0.55
+
+# ---------------------------------------------------------------- scheduling
+# When each tracked vehicle is (re-)OCR'd (ocr_scheduler.py): on first
+# sight, when it has grown by regrow_ratio (came closer), and every
+# retry_seconds, until its plate is confirmed plate_confirmations times
+# and other text too, or max_attempts is used up.
+scheduler:
+  min_vehicle_height: 60      # px; smaller vehicles are not OCR'd yet
+  max_attempts: 8
+  retry_seconds: 0.5
+  regrow_ratio: 1.4
+  plate_confirmations: 2
+  queue_size: 8               # pending OCR jobs; live streams drop (and retry) beyond this
+
+# ---------------------------------------------------------------- publishing
+# One MinIO frame + one NATS detection per vehicle, once its reading is
+# final — replaces EdgeOCR's events.py (its own MinIO client and ffmpeg
+# clips are not ported; uploads go through the slave's FrameUploader).
+publish:
+  lost_seconds: 2.0           # vehicle unseen this long -> publish its best read
+  max_wait_seconds: 30        # ...or after watching it this long, even if still visible
+  # A plate or text line is published only once read the same way in
+  # min_reads frames, unless a single read is at least this confident.
+  min_reads: 2
+  single_read_confidence: 0.9
+  forget_after_seconds: 120   # drop a published vehicle's state (keeps memory flat)
+
+# ---------------------------------------------------------------- vehicle color (dynamic ON/OFF toggle)
+# When enabled: true, classifies vehicle color in parallel on a background thread
+# (color_scheduler.py) using the SAME tracked vehicle boxes from vehicle_text's
+# YOLO detector — no second vehicle detection. Each vehicle is classified up to
+# max_attempts times and the votes are merged into its one published reading.
+# Editing this block takes effect within poll_interval_seconds, no restart.
+#
+# The color model follows the job type: the onnx:/nb: entry below matching the
+# job's model_name extension is used, and its runner is picked from the file's
+# extension (.onnx -> onnxruntime, .nb -> NPU). Files are resolved against
+# processes/worker/models/vehicle_color/ (the color model's own folder).
+color:
+  enabled: false
+  confidence_threshold: 0.40  # a vote below this is ignored
+  min_crop_pixels: 40         # vehicles smaller than this (w or h, px) are not classified
+  poll_interval_seconds: 2.0  # how often this file is re-read for changes
+  queue_size: 8               # pending color jobs; beyond this new crops are dropped
+  max_attempts: 3             # classifications per tracked vehicle
+  regrow_ratio: 1.4           # re-classify once the vehicle box has grown this much
+  onnx:                       # .onnx job — CPU (onnxruntime)
+    model: vehicle_color.onnx
+  nb:                         # .nb job — A311D NPU; .so is the .nb's companion library
+    model: vehicle_color.nb
+    library: libnn_vehicle_color.so
+
+# ---------------------------------------------------------------- .onnx job
+# model_name: vehicle_text.onnx — everything on CPU (onnxruntime).
+# EdgeOCR profile: cpu_quality_ppocr.
+onnx:
+  threads: 2                  # intra-op threads per model
+  detect_every: 1             # run YOLO every Nth frame
+  rec_width: 320              # recognizer input width (height is fixed at 48)
+  yolo: vehicle_text.onnx
+  det: vehicle_text_det.onnx
+  recognizers:
+    english: vehicle_text_english.onnx
+    hindi: vehicle_text_hindi.onnx
+    gujarati: vehicle_text_gujarati.onnx
+
+# ---------------------------------------------------------------- .nb job
+# model_name: vehicle_text.nb — Amlogic A311D NPU via asnn, int16.
+# EdgeOCR profile: a311d_npu_ppocr_sqf_all, validated on the Electron
+# board — copy changes from there, don't hand-tune: input_scale/offset
+# undo the normalization the NPU graphs were compiled with, input_stretch
+# makes the 48x336 recognizer input square (non-square I16 input corrupts
+# memory on this NPU), and the recognizers' last layers run on CPU (*_tail)
+# because they lose their scores in int16. See ocr_runtime.py.
+nb:
+  threads: 2                  # CPU tails / any onnxruntime fallback
+  detect_every: 1
+  rec_width: 336              # the .nb recognizers are compiled for 48x336
+  yolo:
+    backend: asnn
+    nb: vehicle_text.nb
+    library: vehicle_text.so
+    input_scale: 255
+    postprocess: yolo_dfl     # DFL box decoding in NumPy (converter gets its axes wrong)
+  det:
+    backend: asnn
+    nb: vehicle_text_det.nb
+    library: vehicle_text_det.so
+    input_scale: [58.395, 57.12, 57.375]
+    input_offset: [123.675, 116.28, 103.53]
+  recognizers:
+    english:
+      backend: asnn
+      nb: vehicle_text_english.nb
+      library: vehicle_text_english.so
+      input_scale: 127.5
+      input_offset: 127.5
+      input_stretch: 7
+      postprocess: cpu_tail
+      tail: vehicle_text_english_tail.onnx
+      tail_threads: 1
+    hindi:
+      backend: asnn
+      nb: vehicle_text_hindi.nb
+      library: vehicle_text_hindi.so
+      input_scale: 127.5
+      input_offset: 127.5
+      input_stretch: 7
+      postprocess: cpu_tail
+      tail: vehicle_text_hindi_tail.onnx
+      tail_threads: 1
+    gujarati:
+      backend: asnn
+      nb: vehicle_text_gujarati.nb
+      library: vehicle_text_gujarati.so
+      input_scale: 127.5
+      input_offset: 127.5
+      input_stretch: 7
+      postprocess: cpu_tail
+      tail: vehicle_text_gujarati_tail.onnx
+      tail_threads: 1

@@ -61,7 +61,7 @@ minio:
   endpoint: 192.168.1.13:9000
   access_key: minioadmin
   secret_key: minioadmin
-  bucket: face
+  bucket: text
   secure: false
   enabled: true # TEMP: MinIO server at 192.168.1.21 has no license — set back to true once 'mc license update' is run on the server
 

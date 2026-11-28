@@ -26,3 +26,14 @@ onnxruntime>=1.17
 # open_image_models (anpr_night's YOLOv9-t, ONNX, no torch needed;
 # auto-downloaded on first use).
 open-image-models>=0.6
+
+# Vehicle Text (processes/worker/models/vehicle_text/, EdgeOCR port).
+# Its models run on onnxruntime (above) or, for .nb jobs, the board's
+# Electron `asnn` package (vendor SDK, same as the other .nb models).
+pillow>=10.0   # text_overlay.py draws Hindi/Gujarati text; needs Noto fonts:
+               # apt install fonts-noto-core (Latin-only boxes without them)
+scipy>=1.10    # optional: optimal ByteTrack matching (greedy fallback without it)
+# Optional language ID (vehicle_text.yaml language_id.enabled) only:
+# fasttext-wheel==0.9.2 needs numpy<2 — conflicts with the numpy 2.x
+# that torch/ultralytics use here, so it is not installed by default.
+#fasttext-wheel==0.9.2
