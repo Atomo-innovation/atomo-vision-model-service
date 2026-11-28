@@ -41,6 +41,10 @@ class PlateEnricher:
         self._min_confirmations = int(ocr_cfg.get("min_confirmations", 1))
         self._max_vote_history = int(ocr_cfg.get("max_vote_history", 30))
         self._validate_indian_plate = bool(ocr_cfg.get("validate_indian_plate", True))
+        # Plates shorter than this (px) are tracked but not OCR'd: their reads
+        # are mostly wrong and, on the board, they starve car/bus/truck plates
+        # of OCR time. 0 = OCR every plate.
+        self._min_plate_height = float(ocr_cfg.get("min_plate_height_px", 0))
 
         self._tracker = PlateTracker(
             max_match_distance=float(tracking_cfg.get("max_match_distance_px", 90)),
@@ -85,7 +89,8 @@ class PlateEnricher:
             # only every `interval_frames` (saves CPU on slow boards without
             # changing which number gets published).
             interval = self._interval if track.published else self._search_interval
-            if self._ocr is not None and (frame_number - track.last_ocr_frame) >= interval:
+            tall_enough = (detection.bbox[3] - detection.bbox[1]) >= self._min_plate_height
+            if self._ocr is not None and tall_enough and (frame_number - track.last_ocr_frame) >= interval:
                 track.last_ocr_frame = frame_number
                 plate, score, valid, _ = self._ocr.read_plate(gray, detection.bbox)
                 accepted = bool(plate) and score >= self._min_score
